@@ -1,0 +1,164 @@
+#ifndef _CC_PBX_H_
+#define _CC_PBX_H_
+
+#include<switch.h>
+#include<stdbool.h>
+
+#define NELEMS(x)  (sizeof(x) / sizeof((x)[0]))
+#define IS_NULL(x)  (x == NULL)?true:false
+
+
+typedef struct {
+    bool is_dnd;                                                                                                  
+    bool is_init;
+    bool is_vm_on;
+    bool is_recording_allowed;
+    bool is_outbound_allowed;
+    bool is_sd_allowed;
+    bool is_call_frwd;
+    bool is_call_trns;
+    bool blacklist;
+    uint8_t   ring_timeout;
+    char *cid_hdr_value;
+    char *cid_name;
+    char *external_cid;
+    char *codec;
+    unsigned int cid_hdr_type;
+    unsigned int pkg_id;
+    unsigned int cust_id;
+    unsigned int id;
+    char num[20];
+} ext_detail_t;
+
+
+typedef struct {
+    bool is_callee_did;
+    bool is_did_free;
+    bool is_billing_on;
+    bool is_call_transferred;
+    bool is_frwd_all;
+    bool is_frwded;
+    bool is_frwd_outbound;
+    bool is_call_internal;
+    bool is_call_inbound;
+    bool is_inbound_sip;
+    bool is_call_outbound;
+    bool is_call_speeddial;
+}call_status_flag_t;
+
+
+typedef struct{
+	bool gw_grp_id;
+	bool is_lcr_on;
+	bool is_init;
+	  //         min_dur;
+	//unsigned int incr_dur; // billing block
+	unsigned int gw_id;
+	unsigned int rate_card_id;
+	unsigned int call_plan_id;
+	double buy_rate;
+	char* incr_dur;//billing block
+	char*  min_dur;
+        char* sell_rate;
+	char* dial_prefix;
+	char* bill_type;
+	char* gw_ip;
+	char* gw_port;
+	char* gw_codec;
+	char* gw_prepend;
+	char* gw_prepend_cid;
+}outbound_detail_t;
+
+typedef struct {
+	uint8_t type;// 0=Disabled,1=Voicemail,2=External,3=Extension
+	char num[15];
+}call_frwd_t;
+
+
+
+typedef struct{
+    bool is_init;
+    bool is_recording_on;
+    uint8_t grp_type;
+    unsigned int ring_timeout;
+    unsigned int moh;
+    unsigned int id;
+    char* extensions;
+}callgrp_details_t;
+
+
+typedef struct{
+    bool is_init;
+    bool is_recording;
+    char *ext;
+    char *admin_pin;
+    char *mem_pin;
+    unsigned int wc_prompt;
+    unsigned int moh;
+    unsigned int id;
+}conf_details_t;
+
+typedef struct {
+    bool is_blacklist_on;
+    bool is_vm_on;
+    bool is_recording_on;
+    bool is_outbound_on;
+    bool is_call_barging_on;
+    uint8_t type;
+    unsigned int cust_id;
+    unsigned int bill_type;
+    unsigned int max_cc;
+    unsigned int actv_ftr_id;
+    unsigned int dst_id;
+    double fixrate;
+    double selling_rate;
+    double conn_charge;
+    char num[20];
+}did_details_t;
+
+typedef struct {
+    ext_detail_t caller;
+    ext_detail_t callee;
+    did_details_t did;
+    call_frwd_t frwd[4]; // 4 -> all,busy,noans,unavail
+    outbound_detail_t obd;
+    call_status_flag_t flags;
+    callgrp_details_t cg;
+    conf_details_t conf;
+} call_details_t;
+
+
+// fs_dbh
+switch_status_t execute_sql(char *odbc_dsn, char *sql, switch_mutex_t *mutex);
+char *execute_sql2str(char *odbc_dsn, switch_mutex_t *mutex, char *sql, char *resbuf, size_t len);
+switch_bool_t execute_sql_callback(char *odbc_dsn, switch_mutex_t *mutex, char *sql, switch_core_db_callback_func_t callback,void *pdata);
+
+
+// cc_pbx_feature
+switch_status_t handle_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call_info);
+bool handle_sip_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call);
+bool handle_sd(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call);
+void ivr(switch_core_session_t *session,uint8_t min,  uint8_t max, char* audio_file,const char * result);
+void eaves_drop(switch_core_session_t *session,const char * extension) ; 
+void feature_code(switch_core_session_t *session,const char *callee,const char * caller,call_details_t *  call_info,char * dsn,
+		switch_mutex_t *mutex );
+void valetpark(switch_core_session_t *session,const char *callee);
+
+
+
+//cc_pbx_function
+bool is_black_listed(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call);
+bool get_ext_details(switch_channel_t *channel,ext_detail_t *extn,char * dsn,switch_mutex_t *mutex,const char* num);
+void forward_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call,int type);
+void set_recording(switch_channel_t *channel,const char* type,call_details_t *call);
+void voicemail(switch_core_session_t *session,char *check,char *auth,const char *num);
+void bridge_call(switch_core_session_t *session,call_details_t *call,const char *dial_num);
+void check_call_frwd(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call);
+void outbound(switch_core_session_t *session,char * dsn,switch_mutex_t *mutex,call_details_t *call,const char *num);
+bool verify_did(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,did_details_t *did);
+bool verify_internal_exten(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call,const char *num);
+void handle_conf(switch_channel_t *channel,call_details_t *call);
+void handle_cg(switch_channel_t *channel,call_details_t *call);
+void handle_did_dest(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call);
+#endif
+

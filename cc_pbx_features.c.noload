@@ -1,0 +1,314 @@
+#include "cc_pbx.h"
+
+switch_status_t handle_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *      call_info){
+
+    switch_status_t status = SWITCH_STATUS_SUCCESS;
+    switch_core_session_t* session = switch_channel_get_session(channel);
+    const char* caller = switch_channel_get_variable(channel,"sip_contact_user");
+    const char* callee = switch_channel_get_variable(channel,"sip_req_user");
+
+    if(!get_ext_details(channel,&call_info->caller,dsn,mutex,caller)){
+       	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : INBOUND\n"); 
+	switch_channel_set_variable(channel,"vivek","callee");
+
+	if(!verify_did(channel,dsn,mutex,&call_info->did)){
+		switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+		switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+       		return status;
+       }
+//	handle_did_dest(channel,dsn,mutex,call_info);
+//       return status;
+    }
+// should be executed only if caller is extension of system
+    switch(strlen(callee)){
+        case 2:
+		if(callee[0] != '*'){
+                	switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+			switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+		}
+
+		if(call_info->caller.is_sd_allowed == true){
+            		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : speeddial\n");
+			handle_sd(channel,dsn,mutex,call_info);
+		}else{	// may add prompt feature disabled of something
+			switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+		}	
+            break;
+	case 3:
+	     if(callee[0] != '*'){
+                        switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+                        switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+			break;
+                }
+
+            if(call_info->caller.is_init == true  ){
+		    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : feature_code\n");
+  
+		    feature_code(session, callee,caller, call_info, dsn,mutex);
+		      // WHY IS THERE ONLY REJETED HANGUP CAUSE DONT YOU THINK IT CAN HAVE ANOTHER HANGUP CAUSE?
+	              switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                  }else{// DO WE NEED ELSE ?
+		           switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+
+		  }
+	        
+             break;
+        case 4:
+            switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : internal exten conf/cg/ivr/queue\n");
+       	    switch_channel_set_variable(channel,"call_type","internal");
+
+	    if(verify_internal_exten(channel,dsn,mutex,call_info,callee)){
+                	call_info->flags.is_call_internal = true;
+	                
+			if(call_info->cg.is_init){
+				handle_cg(channel,call_info);	
+			}else if(call_info->conf.is_init){
+				handle_conf(channel,call_info);	
+			}
+	    }else{
+	    	 switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+                 switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+		 status = SWITCH_STATUS_FALSE;
+	    } 
+            break;
+	case 5:
+                if(callee[0] != '*'){
+                        switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+                        switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+			break;
+                }
+
+	     if(call_info->caller.is_init == true){
+		      switch_channel_set_variable(channel,"call_type","valetpark");
+	               valetpark(session,callee);
+		}
+	    break;
+        case 7:
+            if(call_info->caller.is_init == true){
+            	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : SIP extn\n");
+                    switch_channel_set_variable(channel,"call_type","SIP extn");
+
+		if(!handle_sip_call(channel,dsn,mutex,call_info))
+			status = SWITCH_STATUS_FALSE;
+	    }	
+            break;
+        default:
+	    if(verify_did(channel,dsn,mutex,&call_info->did)){
+            	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Dialed Number is DID. %d\n",call_info->caller.is_init);
+               switch_channel_set_variable(channel,"call_type","inbound");
+                     switch_channel_set_variable(channel,"sell_rate",call_info->did.selling_rate);
+                     switch_channel_set_variable(channel,"billing_type",call_info->did.bill_type);
+                     switch_channel_set_variable(channel,"connect_chrg",call_info->did.conn_charge );
+                    
+
+
+         	if(call_info->caller.is_init == false  ){
+			handle_did_dest(channel,dsn,mutex,call_info);
+			break;
+		}
+	    }  
+	    if(call_info->caller.is_outbound_allowed){
+		    switch_channel_set_variable(channel,"call_type","outbound");
+
+		    call_info->flags.is_call_outbound = true;
+		if(call_info->caller.is_recording_allowed){
+        	    set_recording(channel,"call",call_info);
+	        }
+		outbound(session,dsn,mutex,call_info,callee);
+		if(call_info->obd.gw_id != 0){	// may add prompt that no gw found
+
+                     switch_channel_set_variable(channel,"sell_rate",call_info->obd.sell_rate);
+                     switch_channel_set_variable(channel,"selling_min_duration",call_info->obd.min_dur);
+                     switch_channel_set_variable(channel,"selling_billing_block",call_info->obd.incr_dur);
+	               switch_channel_set_variable(channel,"call_plan_id",call_info->obd.call_plan_id);
+                       switch_channel_set_variable(channel,"buy_rate",call_info->obd.buy_rate);
+                        switch_channel_set_variable(channel,"gateway_group_id",call_info->obd.gw_id);
+                         switch_channel_set_variable(channel,"dial_prefix",call_info->obd.dial_prefix);
+
+                 	//	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,call_info->obd.sell_rate);
+        		bridge_call(session,call_info,callee);
+		}
+	    }else {
+
+                 	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"OUTBOUND DISABLED FOR %s\n",call_info->caller.num);
+	 	} 
+            break;
+    }
+
+    return status;
+}
+
+
+
+bool handle_sip_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call) {
+        const char* callee = switch_channel_get_variable(channel,"sip_req_user");
+        switch_core_session_t* session = switch_channel_get_session(channel);
+	const char* dialstatus = NULL;
+	 switch_channel_set_variable(channel,"vivek",callee);
+	if(call->flags.is_call_speeddial){
+		callee = call->callee.num;	
+	}
+
+        if(!get_ext_details(channel,&call->callee,dsn,mutex,callee)){
+                switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"CALL TYPE : OUTBOUND\n");
+                switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+                switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                return false;
+        }
+
+
+        switch_channel_set_variable(channel,"absolute_codec_string",call->caller.codec);
+
+        // Handle DND
+        if(call->callee.is_dnd == true){
+                switch_ivr_play_file(session, NULL, "ivr/ivr-dnd_activated.wav", NULL);
+                switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                return false;
+        }
+      // Handle Blacklisted number
+        if( (call->callee.blacklist==true) && (is_black_listed(channel,dsn,mutex,call)) ){
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_ERROR,"Dialed extension/Number is blacklisted.\n");
+                switch_ivr_play_file(session, NULL, "ivr/ivr-call_rejected.wav", NULL);
+                switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                return false;
+        }
+        // Handle call recording
+        if(call->caller.is_recording_allowed == true){
+                set_recording(channel,"call",call);
+        }
+	// Handle call frwd 
+        if(call->callee.is_call_frwd == true){
+		check_call_frwd(channel,dsn,mutex,call);
+		if(call->frwd[0].type != 0){
+			call->flags.is_frwd_all = true;
+			forward_call(channel,dsn,mutex,call,0);
+			return true;
+		}
+	}
+        bridge_call(session,call,call->callee.num);
+	dialstatus = switch_channel_get_variable(channel,"DIALSTATUS");
+    	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"Hangup cause: %s\n",dialstatus);
+	if((call->callee.is_vm_on == true)&&(strcmp(dialstatus,"SUCCESS"))){
+		voicemail(session,NULL,NULL,callee);
+	}
+        return true;
+}
+
+bool handle_sd(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call) {
+	const char* callee = switch_channel_get_variable(channel,"sip_req_user");
+        switch_core_session_t* session = switch_channel_get_session(channel);
+	char *query = NULL;
+	unsigned int country_id = 0;
+	char dial_num[20] = {'\0'};
+    	char result[128] = {'\0'};
+	query = switch_mprintf("SELECT CONCAT_WS('#',number,country_id) from pbx_speed_dial WHERE customer_id = %d and extension_id = %d  and status='1'  AND digit='%s'",call->caller.cust_id,call->caller.id,callee);
+	execute_sql2str(dsn,mutex,query,result,NELEMS(result));
+    	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"%s\n",query);
+    	switch_safe_free(query);
+	if(!IS_NULL(result) && strlen(result)){
+        	//sscanf(result,"%s#%u",dial_num,&country_id);
+        	sscanf(result,"%[^#]#%u",dial_num,&country_id);
+        	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"result :: %s, country : %d , num : %s \n",result,country_id,dial_num);    
+	    		
+		if(country_id != 0){
+			if(call->caller.is_outbound_allowed){
+		    		call->flags.is_call_outbound = true;
+				if(call->caller.is_recording_allowed){
+        	   			 set_recording(channel,"call",call);
+	        		}//maybe add prompt that not allwed 
+				outbound(session,dsn,mutex,call,dial_num);
+				if(call->obd.gw_id != 0){	// may add prompt that no gw found
+        				bridge_call(session,call,dial_num);
+				}
+	    		} 
+		}else{
+		    	call->flags.is_call_speeddial = true;
+			strcpy(call->callee.num,dial_num);
+        		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_ERROR,"%s %s\n",dial_num,call->callee.num);
+			handle_sip_call(channel,dsn,mutex,call);
+		}
+    	}else {
+        	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_ERROR,"Extension details not found for speed dial.\n");
+		return false;
+    	}
+	return true;
+}
+
+
+void handle_cg(switch_channel_t* channel,call_details_t *call){
+ //       switch_core_session_t* session = switch_channel_get_session(channel);
+	const char* opsp_ip = switch_channel_get_variable(channel,"sip_network_ip");
+    	const char* opsp_port = switch_channel_get_variable(channel,"sip_network_port");
+	char *dial_num = NULL;
+	char *sign = (call->cg.grp_type == 1)?",":"|";
+	char *token,*rest,*new_str,*tmp;
+	token = rest = new_str = tmp = NULL;	
+	rest = call->cg.extensions;
+        
+	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Bridge string:: CALL GROUP\n");    
+
+	token = strtok_r(call->cg.extensions,",",&rest);
+//	tmp = switch_mprintf("[leg_timeout=%d,ignore_early_media=true]sofia/internal/%s@%s:%s",call->cg.ring_timeout,token,opsp_ip,opsp_port);
+
+	while( token != NULL){
+		dial_num = switch_mprintf("[leg_timeout=%d,ignore_early_media=true]sofia/internal/%s@%s:%s",call->cg.ring_timeout,token,opsp_ip,opsp_port);
+		if(tmp == NULL){
+			new_str = switch_mprintf("%s",dial_num);
+		}else{	
+               		 new_str = switch_mprintf("%s%s %s",tmp,sign,dial_num);
+		}
+		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Bridge string:: %s\n",dial_num);    
+                switch_safe_free(dial_num);
+                switch_safe_free(tmp);
+		tmp = new_str;
+		token = strtok_r(NULL,",", &rest);
+	}
+	if(call->caller.is_recording_allowed){
+                set_recording(channel,"cg",call);
+        }
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Bridge string:: %s \n",new_str);    
+//	switch_core_session_execute_application(session,"bridge",new_str);
+       	switch_safe_free(new_str);
+}
+
+
+void handle_conf(switch_channel_t * channel,call_details_t *call){
+	const char * conf_pin = NULL;
+        switch_core_session_t* session = switch_channel_get_session(channel);
+		char digit_buffer[128] = "";
+		char *new_str = NULL;
+		switch_time_exp_t tm;
+    		char date[50] = "";
+    		switch_size_t retsize;
+    		switch_time_t ts;
+
+		ts = switch_time_now();
+    		switch_time_exp_lt(&tm, ts);
+    		switch_strftime(date,&retsize,sizeof(date),"%Y-%m-%d-%T",&tm);
+		if(call->conf.is_recording == true){
+			new_str = switch_mprintf("conference_auto_record=conf_%s_%s.wav",call->conf.ext,date);
+       			switch_core_session_execute_application(session,"set",new_str);
+			switch_safe_free(new_str);
+		}
+		
+		switch_channel_answer(channel);
+		for(int i=0;i<=2;i++){
+		 switch_play_and_get_digits(session, 5, 5, 1, 15000, "#","conference/conf-enter_conf_pin.wav",NULL , "conf_pin", digit_buffer, sizeof(digit_buffer),"\\d{5}", 10000, NULL);
+			
+        	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_ERROR,"CONFPIN:%s \n",digit_buffer);
+    		conf_pin= switch_channel_get_variable(channel,"conf_pin");
+        	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_ERROR,"CONFPIN:%s  || %s\n",digit_buffer,conf_pin);
+			if(IS_NULL(conf_pin)){
+       				switch_core_session_execute_application(session,"playback","/home/cloudconnect/pbx_new/upload/def_prompts/no_input.wav");
+			}else if(!strncmp(call->conf.admin_pin,digit_buffer,5)){
+				new_str = switch_mprintf("%d_%s++flags{moderator}",call->conf.cust_id,call->conf.ext);
+       				switch_core_session_execute_application(session,"conference",new_str);
+				switch_safe_free(new_str);
+			} else if(!strncmp(call->conf.mem_pin,digit_buffer,5)){
+       				switch_core_session_execute_application(session,"conference",call->conf.ext);
+			}else{
+       				switch_core_session_execute_application(session,"playback","conference/conf-bad-pin.wav");
+			}
+		}
+
+}

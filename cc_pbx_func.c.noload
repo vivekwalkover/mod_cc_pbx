@@ -1,0 +1,779 @@
+#include "cc_pbx.h"
+
+static int exten_init_callback(void *parg,int argc,char **argv,char **column_names){
+
+   ext_detail_t *exten = (ext_detail_t *) parg;
+  /*  if (argc < 17){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"Callback failed\n");                                
+        return -1;
+    }
+*/
+   
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"Callback count : %d\n",argc);                                
+    for(int i = 0 ; i<argc;i++)
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"exten : %d %s %s\n",i,column_names[i],argv[i]);
+
+    exten -> pkg_id               = atoi(argv[0]);
+    exten -> cust_id              = atoi(argv[1]);
+    if(!IS_NULL(argv[2]) && strlen(argv[2])){
+        exten -> cid_name  = strdup(argv[2]);
+    }
+    exten -> ring_timeout         = atoi(argv[3]);
+    if(!IS_NULL(argv[4]) && strlen(argv[4])){
+        exten -> external_cid = strdup(argv[4]);
+    }
+    exten -> cid_hdr_type         = atoi(argv[5]);
+    if(!IS_NULL(argv[6]) && strlen(argv[6])){
+        exten -> cid_hdr_value    = strdup(argv[6]);
+    }
+    if(!IS_NULL(argv[7]) && strlen(argv[7])){
+        exten -> codec            = strdup(argv[7]);
+    }
+    exten -> is_vm_on             = atoi(argv[8]);
+    exten -> is_dnd               = atoi(argv[9]);
+    exten -> is_outbound_allowed  = atoi(argv[10]);
+    exten -> is_recording_allowed = atoi(argv[11]);
+    exten -> is_call_frwd         = atoi(argv[12]);
+    exten -> blacklist            = atoi(argv[13]);
+    exten -> is_call_trns         = atoi(argv[14]);
+    exten -> id                   = atoi(argv[15]);
+    exten -> is_sd_allowed        = atoi(argv[16]);
+    if(!IS_NULL(argv[17]) && strlen(argv[17])){
+        strcpy(exten -> num,argv[17]);
+    }
+    exten -> is_init              = true;
+    return 0;
+}
+
+
+bool get_ext_details(switch_channel_t *channel,ext_detail_t *extn,char * dsn,switch_mutex_t *mutex,const char* num){
+    char *query = NULL;
+    const char* ext_id = switch_channel_get_variable(channel,"ext_id");
+    if(IS_NULL(ext_id)){
+    	query = switch_mprintf("SELECT package_id,customer_id,caller_id_name,ring_time_out,\
+            external_caller_id,caller_id_header_type,caller_id_header_value,codec,\
+            voicemail,dnd,outbound,recording,forward,black_list,call_transfer,id,speed_dial,ext_number\
+            FROM extension_master\
+            WHERE status='1' AND ext_number='%s'",num);
+    }else{
+    	query = switch_mprintf("SELECT package_id,customer_id,caller_id_name,ring_time_out,\
+            external_caller_id,caller_id_header_type,caller_id_header_value,codec,\
+            voicemail,dnd,outbound,recording,forward,black_list,call_transfer,id,speed_dial,ext_number\
+            FROM extension_master\
+            WHERE status='1' AND id='%s'",ext_id);
+    }
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Exten query: %s\n",query);
+     execute_sql_callback(dsn,mutex,query,exten_init_callback,extn);
+     switch_safe_free(query);
+    if(!extn->is_init){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"failed to get extension details.\n");
+        return false;
+    }
+
+    return true;
+}
+
+
+
+bool is_black_listed(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call){
+    
+    char *query = NULL;
+    const char* caller;
+    char result[20] = {'\0'};
+
+    caller = switch_channel_get_variable(channel,"sip_contact_user");
+    query = switch_mprintf("select phone_number \
+                from pbx_black_list \
+                where status='1' \
+                and customer_id=%d \
+                and extension_id in (0,%d) \
+                and phone_number=%s",call->callee.cust_id,call->callee.id,caller); 
+    execute_sql2str(dsn,mutex,query,result,NELEMS(result));
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"result : %s :: Query : %s :: %d\n",result,query,IS_NULL(result));    
+    switch_safe_free(query);
+    return  strlen(result)?true:false;
+}
+
+void set_recording(switch_channel_t *channel,const char* type,call_details_t *call){
+    
+    char *tmp_str = NULL;
+    switch_time_exp_t tm;
+    char date[50] = "";
+    switch_size_t retsize;
+    switch_time_t ts;
+
+    switch_core_session_t* session = switch_channel_get_session(channel); 
+    const char recording_path[] = "/home/cloudconnect/pbx_new/upload";
+    ts = switch_time_now();
+    switch_time_exp_lt(&tm, ts);
+    switch_strftime(date,&retsize,sizeof(date),"%Y-%m-%d-%T",&tm);
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"RECORD DETAILS: Type:%s DATE:%s Caller:%s\n",type,call->caller.num,date);    
+
+    switch_core_session_execute_application(session,"set","RECORD_STEREO=true");
+    switch_core_session_execute_application(session,"set","media_bug_answer_req=true");
+    tmp_str = switch_mprintf("%s/%d/recording/%s_%s_%s.wav",recording_path,call->caller.cust_id,type,call->caller.num,date);
+    switch_core_session_execute_application(session,"record_session",tmp_str);
+    switch_safe_free(tmp_str);
+
+}
+
+void voicemail(switch_core_session_t *session,char *check,char *auth,const char *num){
+	char *tmp_str = NULL;
+	tmp_str = switch_mprintf("%s %s default 119.18.55.154 %s",check,auth,num);
+        switch_core_session_execute_application(session,"voicemail",tmp_str);
+	switch_safe_free(tmp_str);
+}
+
+
+void bridge_call(switch_core_session_t *session,call_details_t *call,const char *dial_num){
+
+    char *tmp_str = NULL;
+    switch_channel_t * channel = switch_core_session_get_channel(session);
+    const char *opsp_ip = switch_channel_get_variable(channel,"sip_network_ip");
+    const char *opsp_port = switch_channel_get_variable(channel,"sip_network_port");
+
+  /*CALLER ID OVERRIDE PENDING should be handled as different function
+   *
+   * if(call->cust.is_callerid_override_on && (!IS_NULL(call->caller.callerid_number))) {
+        tmp_str = switch_mprintf("{originate_timeout=%d,origination_caller_id_name=%s}sofia/internal/%s@%s:%s",   call->caller.ring_timeout,call->caller.cid_name,dial_num,opsp_ip,opsp_port);
+    } else {
+
+    */
+    if(call->flags.is_frwd_outbound || call->flags.is_call_outbound){
+        int ring_timeout = (call->flags.is_frwd_outbound == true)?call->callee.ring_timeout:call->caller.ring_timeout;
+        tmp_str = switch_mprintf("{originate_timeout=%d,ignore_early_media=true}sofia/gateway/gw_%s/%s",ring_timeout,call->obd.gw_id,dial_num);
+    // tmp_str = switch_mprintf("{originate_timeout=%d}sofia/internal/%s@%s:%s",call->caller.ring_timeout,dial_num,opsp_ip,opsp_port);
+
+    }
+    else{
+       tmp_str = switch_mprintf("{originate_timeout=%d}sofia/internal/%s@%s:%s",call->caller.ring_timeout,dial_num,opsp_ip,opsp_port);
+   }
+
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"Dial_string : %s\n",tmp_str);
+    switch_core_session_execute_application(session,"bridge",tmp_str);
+    switch_safe_free(tmp_str);
+}
+
+
+static int call_frwd_callback(void *parg,int argc,char **argv,char **column_name){
+
+    call_frwd_t *cfrwd = (call_frwd_t *)parg;
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Call frwd : callback \n");
+    if(argc < 8)
+        return -1;
+
+    cfrwd[0].type = atoi(argv[0]);
+    if(!IS_NULL(argv[1]) && strlen(argv[1])){
+        strcpy(cfrwd[0].num,argv[1]);
+    }
+    cfrwd[1].type = atoi(argv[2]);
+    if(!IS_NULL(argv[3]) && strlen(argv[3])){
+        strcpy(cfrwd[1].num,argv[3]);
+    }
+    cfrwd[2].type = atoi(argv[4]);
+    if(!IS_NULL(argv[5]) && strlen(argv[5])){
+        strcpy(cfrwd[2].num,argv[5]);
+    }
+    cfrwd[3].type = atoi(argv[6]);
+    if(!IS_NULL(argv[7]) && strlen(argv[7])){
+        strcpy(cfrwd[3].num,argv[7]);
+    }
+    //cfrwd->is_init = true;
+
+    return 0;
+}
+
+void check_call_frwd(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call){
+    char *query = NULL;
+    if(!(call->callee.is_init)){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Callee not system user. No check for frwd\n");    
+        return;
+    }
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Call frwd check\n");    
+    query = switch_mprintf("SELECT  `universal_type`, `universal_external`, \
+            `busy_type`, `busy_external`, `noanswer_type`, \
+            `noanswer_external`, `unavailable_type`, `unavailable_external` \
+            FROM `pbx_call_forward` \
+            WHERE `customer_id`=%d \
+            AND `extension_id`=%d \
+            AND `status`='1'",call->callee.cust_id,call->callee.id);
+    execute_sql_callback(dsn,mutex,query,call_frwd_callback,&call->frwd);
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Call frwd : %s\n",query);    
+    switch_safe_free(query);
+}
+
+void forward_call(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call,int i){
+
+        switch_core_session_t* session = switch_channel_get_session(channel);
+
+        if(i < 0){
+            switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Forwarding enabled but No setup found\n");
+	    switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);	
+            return ;
+        }
+	if(call->frwd[i].type == 0){
+            	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Forwarding enabled but No setup found\n");
+		switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);	
+		return;	
+	}
+	if(call->flags.is_frwded){
+		switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);	
+		return ;
+	}
+
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"Type: %d\n",call->frwd[i].type);
+	call->flags.is_frwded = true;
+        switch(call->frwd[i].type){
+            case 1:
+                    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"forwarding to voicemail: %s\n",call->callee.num);
+                    voicemail(session,NULL,NULL,call->callee.num);
+                    break;
+            case 2:
+                    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"forwarding to outbound: %s\n",call->frwd[i].num);
+		    call->flags.is_frwd_outbound = true;
+		    outbound(session,dsn,mutex,call,call->frwd[i].num);
+		    if(call->obd.gw_id != 0){ // Add no gw found prompt
+                	    bridge_call(session,call,call->frwd[i].num);
+		    }
+                    break;
+            case 3:
+                    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"forwarding to extension: %s\n",call->frwd[i].num);
+                    bridge_call(session,call,call->frwd[i].num);
+                    break;
+            default:
+		    call->flags.is_frwded = false;
+                    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Forwarding enabled but No setup found\n");
+                    break;
+        }
+
+
+}
+
+
+static int outbound_callback(void *parg,int argc,char **argv,char **column_name){
+	outbound_detail_t* obd = (outbound_detail_t*) parg;
+        
+         //switch_channel_set_variable(channel,"sell_rate",argv[7]);
+	 //switch_channel_set_variable(channel,"selling_min_duration",argv[8]);
+        // switch_channel_set_variable(channel,"selling_billing_block",argv[9]);
+
+      
+       	for(int i = 0 ; i<argc;i++)
+            switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"exten : %d %s %s\n",i,column_name[i],argv[i]);
+
+       	if(!IS_NULL(argv[0]) && strlen(argv[0])){
+	   obd->bill_type=strdup(argv[0]);
+	}
+	obd->gw_grp_id = atoi(argv[1]);
+	obd->is_lcr_on = atoi(argv[2]);
+	obd->rate_card_id = atoi(argv[3]);
+       if(!IS_NULL(argv[4]) && strlen(argv[4])){
+           obd->call_plan_id = strdup(argv[4]);
+         }
+      	if(!IS_NULL(argv[5]) && strlen(argv[5])){
+	obd->dial_prefix=strdup(argv[5]);
+     	}
+         if(!IS_NULL(argv[6]) && strlen(argv[6])){
+
+	obd->buy_rate = strdup(argv[6]);
+             }
+	 if(!IS_NULL(argv[7]) && strlen(argv[7])){
+	obd->sell_rate = strdup(argv[7]);
+        }
+	 if(!IS_NULL(argv[8]) && strlen(argv[8])){
+	obd->min_dur = strdup(argv[8]);
+	 }
+	 if(!IS_NULL(argv[9]) && strlen(argv[9])){
+	obd->incr_dur = strdup(argv[9]);
+	 }
+        if(!IS_NULL(argv[10]) && strlen(argv[10])){
+
+	obd->gw_id   = strdup(argv[10]);
+         }
+	if(!IS_NULL(argv[11]) && strlen(argv[11])){
+		obd->gw_prepend = strdup(argv[11]);
+	}
+	if(!IS_NULL(argv[12]) && strlen(argv[12])){
+		obd->gw_prepend_cid = strdup(argv[12]);
+	}
+	if(!IS_NULL(argv[13]) && strlen(argv[13])){
+		obd->gw_codec = strdup(argv[13]);
+	}
+	obd->is_init = strtol(argv[10],NULL,10);
+	return 0;
+}
+
+
+void outbound(switch_core_session_t *session,char * dsn,switch_mutex_t *mutex,call_details_t *call,const char *num){
+	switch_channel_t * channel = switch_core_session_get_channel(session);
+	bool is_outbound_allowed = false;
+	int cust_id =  0;
+	char *tmp_num = NULL;
+		if(call->flags.is_frwd_outbound == true){
+			is_outbound_allowed = call->callee.is_outbound_allowed;
+			cust_id = call->callee.cust_id;
+		}else{
+			is_outbound_allowed = call->caller.is_outbound_allowed;
+			cust_id = call->caller.cust_id;
+		}
+	
+	if(num[0] != '+'){
+		tmp_num = switch_mprintf("+%s",num);
+	}else{
+		tmp_num = switch_mprintf("%s",num);
+	}
+
+	if(is_outbound_allowed){
+		
+		char *query = NULL;
+                 query = switch_mprintf("select a.billing_type,a.gateway_group_id,c.lc_type,d.id,d.call_plan_id,\
+                d.dial_prefix,d.buying_rate,d.selling_rate,d.selling_min_duration,\
+                d.selling_billing_block,e.id,e.prependDigit_dialnumber,e.prependDigit__callerID,e.codec\
+                from pbx_feature a,map_customer_package b,pbx_call_plan c,pbx_call_plan_rates d,gateway e,package f \
+                where b.customer_id=%d and '%s' like concat(d.dial_prefix,'%%') and a.status='1' and b.status='1' and \
+                c.status='1' and d.status='1' and e.status='1' and d.call_plan_id = a.call_plan_id and \
+                f.id = b.package_id and a.id = f.feature_id and f.product_id=1 and b.product_id=1 and \
+                e.id=d.gateway_id and c.id=a.call_plan_id and b.start_date <= CURDATE() and \
+                b.end_date>= CURDATE()",cust_id,tmp_num);
+	        
+   		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Outbound : %s\n",query);
+    		execute_sql_callback(dsn,mutex,query,outbound_callback,&call->obd);
+		switch_safe_free(query);
+		// Should add prompt as no outbound details found
+		if(call->obd.is_init == false){
+			switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+			switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);		
+			return ;
+		}
+     
+   
+
+	}else{
+		switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+		switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);		
+	}
+
+}
+
+
+
+static int did_init_callback(void *parg,int argc,char **argv,char **column_names){
+    did_details_t *did = (did_details_t*) parg;
+    char *tmp;
+    if(argc < 15){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," DID CALLBACK ERROR : NO DATA %d\n",argc);
+        return -1;
+    }
+    for(int i = 0 ; i<argc;i++)
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_INFO,"DID %d %s %s\n",i,column_names[i],argv[i]);
+    // Here making assumption that if we get result from DB it will be all valid
+    // data type value no negative no string in numeric columns or null values.
+    did->cust_id             = atoi(argv[0]);
+    strncpy(did->num,argv[1],NELEMS(argv[1]));
+     if(!IS_NULL(argv[2]) && strlen(argv[2])){
+     did->bill_type           = strdup(argv[2]);
+     }
+    did->fixrate             = strtod(argv[3],&tmp);   // add tmp check via macro / func if error abort
+   if(!IS_NULL(argv[4]) && strlen(argv[4])){
+     did->conn_charge         = strdup(argv[4]);   // add tmp check via macro / func if error abort
+    }
+     if(!IS_NULL(argv[5]) && strlen(argv[5])){
+
+     did->selling_rate        = strdup(argv[5]);   // add tmp check via macro / func if error abort
+    }
+    did->max_cc              = atoi(argv[6]);
+    did->type                = atoi(argv[7]);
+    did->is_blacklist_on     = atoi(argv[8]);
+    did->is_vm_on            = atoi(argv[9]);
+    did->is_recording_on     = atoi(argv[10]);
+    did->is_outbound_on      = atoi(argv[11]);
+    did->is_call_barging_on  = atoi(argv[12]);
+    did->actv_ftr_id	     = atoi(argv[13]);
+    did->dst_id  	     = atoi(argv[14]);
+	did->is_init = true;
+    return 0;
+}
+
+bool verify_did(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,did_details_t *did){
+    char *sql = NULL;
+    const char* callee = switch_channel_get_variable(channel,"sip_req_user");
+    sql = switch_mprintf("SELECT\
+            a.customer_id,a.did,a.billingtype,a.fixrate,\
+            a.connection_charge,a.selling_rate,a.max_concurrent,a.did_type,\
+		d.black_list,d.voicemail,d.recording,d.outbound_call,d.barging,\
+		f.active_feature_id,f.destination_id\
+            FROM did a,customer b,map_customer_package c,pbx_feature d,package e,did_destination f\
+            WHERE a.`status`='1' AND a.`activated` = '1' \
+            AND b.id=a.customer_id \
+            AND b.status='1'\
+	        and b.id = c.customer_id \
+            and c.start_date <= CURRENT_TIMESTAMP \
+            and c.end_date >= CURRENT_TIMESTAMP \
+            and c.status='1' \
+            and c.product_id=1 \
+            and d.id = e.feature_id \
+            and d.status='1' \
+            and e.id = c.package_id \
+            and e.status='1'\
+	    and f.did_id = a.id and f.customer_id = a.customer_id and a.reserved='1'\
+	    and f.active_feature_id > 0\
+	    AND a.`did`=%s",callee);
+
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," DID CALLBACK ERROR : %s\n",sql);
+    execute_sql_callback(dsn,mutex,sql,did_init_callback,did);
+    switch_safe_free(sql);
+    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," DID CALLBACK ERROR : %d\n",did->cust_id);
+    return (did->cust_id > 0)?true:false;
+}
+
+static int conf_init_callback(void *parg,int argc,char **argv,char **column_names){
+    conf_details_t *conf = (conf_details_t*) parg;
+    if(argc < 7){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CONF CALLBACK ERROR : NO DATA %d\n",argc);
+        return -1;
+    }
+    for(int i = 0 ; i<argc;i++)
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"INTERNAL CONF %d %s %s\n",i,column_names[i],argv[i]);
+
+    conf->is_init       = true;
+    if(!IS_NULL(argv[0]) && strlen(argv[0]))
+            conf->ext   = strdup(argv[0]);
+    conf->cust_id            = atoi(argv[1]);
+    if(!IS_NULL(argv[2]) && strlen(argv[2]))
+            conf->admin_pin = strdup(argv[2]);
+    if(!IS_NULL(argv[3]) && strlen(argv[3]))
+            conf->mem_pin = strdup(argv[3]);
+    conf->wc_prompt     = atoi(argv[4]);
+    conf->moh           = atoi(argv[5]);
+    conf->is_recording  = atoi(argv[6]);
+    return 0;
+}
+
+static int cg_init_callback(void *parg,int argc,char **argv,char **column_names){
+    callgrp_details_t *cg = (callgrp_details_t*) parg;
+    if(argc < 6){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CG CALLBACK ERROR : NO DATA %d\n",argc);
+        return -1;
+    }
+    for(int i = 0 ; i<argc;i++)
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"INTERNAL CG %d %s %s\n",i,column_names[i],argv[i]);
+
+    cg->is_init         = true;
+    cg->id              = atoi(argv[0]);
+    cg->grp_type        = atoi(argv[1]);
+    cg->is_recording_on = atoi(argv[2]);
+    cg->ring_timeout    = atoi(argv[3]);
+    cg->moh             = atoi(argv[4]);
+    if(!IS_NULL(argv[5]) && strlen(argv[5])){
+        cg -> extensions  = strdup(argv[5]);
+    }
+    return 0;
+}
+
+
+
+
+ bool verify_internal_exten(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call,const char *num){
+   char *sql = NULL;
+   bool res  = false;
+
+	if(call->did.is_init){
+		sql = switch_mprintf("SELECT `id`, `group_type`, `recording`, `ringtimeout`, `moh`, `sip` \
+                   FROM pbx_callgroup \
+                   WHERE id=%d AND customer_id=%d",call->did.dst_id,call->did.cust_id);
+
+	}else{
+   		sql = switch_mprintf("SELECT `id`, `group_type`, `recording`, `ringtimeout`, `moh`, `sip` \
+                   FROM pbx_callgroup \
+                   WHERE group_ext=%s AND customer_id=%d",num,call->caller.cust_id);
+	}
+   switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CG SQL : %s\n",sql);
+   execute_sql_callback(dsn,mutex,sql,cg_init_callback,&call->cg);
+   switch_safe_free(sql);
+   res = call->cg.is_init;
+
+   if(res == false){
+	if(call->did.is_init){
+	 	sql = switch_mprintf("SELECT `conf_ext`, `customer_id`, `admin_pin`,\
+                       `participant_pin`, `welcome_prompt`, `moh`, `recording` \
+                        FROM pbx_conference\
+                        WHERE  conf_join_start_date <= CURRENT_TIMESTAMP and\
+                        `conf_join_end_date` >= CURRENT_TIMESTAMP and status = '1'\
+                        AND `id`=%d AND `customer_id`=%d",call->did.dst_id,call->did.cust_id);
+	
+	}else{
+        	sql = switch_mprintf("SELECT `conf_ext`, `customer_id`, `admin_pin`,\
+                       `participant_pin`, `welcome_prompt`, `moh`, `recording` \
+                        FROM pbx_conference\
+                        WHERE  conf_join_start_date <= CURRENT_TIMESTAMP and\
+                        `conf_join_end_date` >= CURRENT_TIMESTAMP and status = '1'\
+                        AND `conf_ext`=%s AND `customer_id`=%d",num,call->caller.cust_id);
+	}
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CG SQL : %s\n",sql);
+        execute_sql_callback(dsn,mutex,sql,conf_init_callback,&call->conf);
+        switch_safe_free(sql);
+        res = call->conf.is_init;
+   }
+   return res;
+}
+
+
+void eaves_drop(switch_core_session_t *session, const char * extension)
+{
+    char *tmp_str=NULL;
+//    switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"callforwording statusf :%s\n",extension);
+      switch_channel_t * channel = switch_core_session_get_channel(session);
+   // const char* uuid= switch_core_session_get_uuid(session);
+   //  switch_core_session_execute_application(session,"db" ,"insert/spymap/$1/${uuid}");
+   // switch_core_session_execute_application(session,"db" ,"insert/spymap/${cid_num}/${uuid}");
+          switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"callforwording statusf :%s\n",extension);
+
+      switch_channel_answer  (channel);
+      tmp_str=switch_mprintf("${db(select/spymap/%s/${uuid})}", extension);
+      switch_core_session_execute_application(session,"eavesdrop",tmp_str);
+      switch_core_session_execute_application(session,"eavesdrop","${db(select/spymap/${cid_num}/${uuid})}");
+      switch_safe_free(tmp_str);
+
+}  
+ void feature_code(switch_core_session_t *session,const char *callee,const char *caller, call_details_t *      call_info,char * dsn,switch_mutex_t *mutex )   {   
+      char* query=NULL ;                                                                                                                    
+      char result[128]={0};
+      char *audio_file="/usr/src/bhati/freeswitch-1.6.20/src/mod/applications/mod_cc_pbx/speech.wav";
+      uint8_t min=7;
+      uint8_t max=14;  
+    
+             
+             switch(atoi(callee+1))
+              {    
+                  case 33:
+                     ivr(session, min,   max, audio_file,  result) ;
+                        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"callforwording statusf :%s\n",result);
+ //                     eaves_drop(session, result);
+                       break;
+                  case 78:
+                    if(call_info->caller.is_dnd == false){
+                        query=switch_mprintf(" update extension_master SET  dnd =1 where ext_number=%s",caller);
+                        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Exten query: %s\n",query);
+                        execute_sql(dsn,query,mutex);   
+                        switch_safe_free(query); 
+                       }
+                    break;                                                                                                                   
+                 case 79:
+                     if(call_info->caller.is_dnd == true){
+                       query=switch_mprintf(" update extension_master SET  dnd =0 where ext_number=%s",caller);
+                         switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Exten query: %s\n",query);
+                       execute_sql(dsn,query,mutex);   
+                       switch_safe_free(query); 
+                     }
+                     
+
+                    break;
+                 case 72: 
+                    if(call_info->caller.is_call_frwd == true){
+                       query=switch_mprintf(" update pbx_call_forward SET  status =1 where customer_id=%s and  extension_id=%s",call_info->caller.cust_id,call_info->caller.id);
+                       switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Exten query: %s\n",query);
+                       execute_sql(dsn,query,mutex);   
+		       switch_safe_free(query); 
+                    }
+		    else 
+                              switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/callfrwd.wav", NULL); 
+                
+                    break;                                                                                                                   
+                 case 73: 
+                    if(call_info->caller.is_call_frwd == true){   
+                       query=switch_mprintf(" update pbx_call_forward SET  status =0 where customer_id=%s and  extension_id=%s",call_info->caller.cust_id,call_info->caller.id);
+                       switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Exten query: %s\n",query);
+                       execute_sql(dsn,query,mutex);
+                       switch_safe_free(query);
+                    }
+		    else 
+
+                        switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/callfrwd.wav", NULL);                 
+                    break;
+                    break;
+                                                                                                                                             
+                case 97:
+
+                      voicemail(session, "check",NULL,caller);
+                      break;
+                case 98:
+		   
+		      voicemail(session, "check",NULL,NULL);
+
+		     break; 
+	       	case 99:
+                       if(call_info->caller.is_vm_on == true){
+                           ivr(session, min,   max, audio_file,  result)     ;
+                           voicemail(session, NULL,NULL,result);
+                         }
+                      break;   
+                 default:
+		      switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+		      break;
+
+              }
+                   
+            }
+
+void valetpark(switch_core_session_t *session,const char *callee)
+{
+    switch_channel_t * channel =switch_core_session_get_channel(session);
+         if (atoi(callee+1)==5900)
+              {
+                   switch_channel_answer  (channel);
+                   switch_core_session_execute_application(session,"valet_park","my_lot auto in 5901 5999");
+             }
+
+        else if(atoi(callee+1)>=5901 && atoi(callee+1)<=5999 )
+              {
+                  switch_channel_answer  (channel);
+                  switch_core_session_execute_application(session,"valet_park","my_lot auto out 5901 5999");
+              }
+
+}
+
+
+
+
+
+void  ivr(switch_core_session_t *session,uint8_t min,  uint8_t max, char* audio_file,const char * result)
+     {
+     int32_t max_tries = 3;
+    uint32_t digit_timeout =2000;
+    int timeout = 15000;
+    char digit_buffer[128] ;
+    const char *bad_input_audio_file =NULL;
+    const char *var_name = NULL;
+    const char *valid_terminators = "#";
+    const char *digits_regex ="[0-9]+";
+    const char *transfer_on_failure = NULL;
+
+    switch_play_and_get_digits(session, min, max, max_tries, timeout, valid_terminators,
+                               audio_file, bad_input_audio_file, var_name, digit_buffer, sizeof(digit_buffer),
+                                 digits_regex, digit_timeout, transfer_on_failure);
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"callforwording statusf :%s\n",digit_buffer);
+
+	     result =strdup(digit_buffer);
+                  eaves_drop(session, result);             
+ 
+     }
+
+/*
+ * Function to handle inbound did call.
+ * Transfer call to mapped destination.
+ * */
+
+void handle_did_dest(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call){
+        //switch_core_session_t* session = switch_channel_get_session(channel);
+	char dst_id[20] = {'\0'};
+	sprintf(dst_id,"%d",call->did.dst_id);
+	switch(call->did.actv_ftr_id){
+		case 1: //SIP
+			call->flags.is_inbound_sip = true;
+			switch_channel_set_variable_printf(channel,"ext_id","%s",dst_id);
+			handle_sip_call(channel,dsn,mutex,call);
+			break;
+	/*	case 2: //IVR NOT IMPLEMENTED YET
+			break;
+	*/
+		case 3: //conf
+			if(verify_internal_exten(channel,dsn,mutex,call,dst_id)){
+			//	call->flags.is_call_internal = true;
+				if(call->conf.is_init){
+					handle_conf(channel,call);
+				}
+			}
+			break;
+		case 4: 
+			handle_queue(channel,dsn,mutex,call);	
+			break;
+		case 5:
+			if(verify_internal_exten(channel,dsn,mutex,call,dst_id)){
+			//	call->flags.is_call_internal = true;
+				if(call->cg.is_init){
+					handle_cg(channel,call);
+				}
+			}
+
+			break;
+		default:
+			break;
+	}
+	return;
+}
+
+static int cq_init_callback(void *parg,int argc,char **argv,char **column_names){
+    queue_details_t *cq = (queue_details_t*) parg;
+    if(argc < 8){
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CG CALLBACK ERROR : NO DATA %d\n",argc);
+        return -1;
+    }
+    for(int i = 0 ; i<argc;i++)
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"Call QUEUE: %d %s %s\n",i,column_names[i],argv[i]);
+
+	cq->is_init         = true;
+     if(!IS_NULL(argv[0]) && strlen(argv[0])){
+        strcpy(cq -> q_name,argv[0]);
+    }
+    cq->max_wait_call   = atoi(argv[1]);
+    cq->welcome_pmt     = atoi(argv[2]);
+    cq->p_anc		= atoi(argv[3]);
+    cq->p_anc_time      = atoi(argv[4]);
+    cq->p_anc_pmt       = atoi(argv[5]);
+    cq->play_pos_on_call = atoi(argv[6]);
+    cq->play_pos_prdcly  = atoi(argv[7]);
+    return 0;
+}
+
+
+
+void handle_queue(switch_channel_t *channel,char * dsn,switch_mutex_t *mutex,call_details_t *call){
+	
+	char *sql = NULL;
+	char *tmp = NULL;
+	switch_core_session_t* session = switch_channel_get_session(channel);
+	switch_stream_handle_t stream = {0};
+
+	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"QUEUE DETAILS : %d",call->did.dst_id);
+        sql = switch_mprintf("select name,max_waiting_call,welcome_prompt,periodic_announcement,\
+			periodic_announcement_time,periodic_announcement_prompt,play_position_on_call,\
+			play_position_periodically from pbx_queue\
+			where id=%d and customer_id=%d and status='1'",call->did.dst_id,call->did.cust_id);
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CQ SQL : %s\n",sql);
+        execute_sql_callback(dsn,mutex,sql,cq_init_callback,&call->cq);
+        switch_safe_free(sql);
+	
+	if(call->cq.is_init == false){
+ 		switch_ivr_play_file(session, NULL, "/home/cloudconnect/pbx_new/upload/def_prompts/ivr-please_check_number_try_again.wav", NULL);
+		switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                return ;	
+	}
+	
+	SWITCH_STANDARD_STREAM(stream);
+        tmp = switch_mprintf("queue count members %s",call->cq.q_name);
+        switch_api_execute("callcenter_config",tmp,NULL,&stream);
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CQ SQL : %d\n",atoi((char *)stream.data));
+        switch_safe_free(tmp);
+
+        if(atoi((char *)stream.data) >= call->cq.max_wait_call ){
+                switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," Call QUEUE %s full.\n",call->cq.q_name);
+                switch_channel_hangup(channel,SWITCH_CAUSE_CALL_REJECTED);
+                return ;
+        }
+        switch_safe_free(stream.data);
+
+        if(call->cq.p_anc){
+                char *uuid = switch_channel_get_uuid(channel);
+                tmp = switch_mprintf("result=${luarun(callcenter-anouncement-position.lua %s %s@defaut %d)}",uuid,call->cq.q_name,(call->cq.p_anc_time * 1000));
+                switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR,"CALL : %d %s.\n",call->cq.p_anc,tmp);
+                switch_core_session_execute_application(session,"set",tmp);
+                switch_safe_free(tmp);
+        }
+
+        tmp = switch_mprintf("%s@default",call->cq.q_name);
+        switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_ERROR," CQ NAME : %s\n",tmp);
+        switch_core_session_execute_application(session,"callcenter",tmp);
+        switch_safe_free(tmp);
+
+	return;
+}
