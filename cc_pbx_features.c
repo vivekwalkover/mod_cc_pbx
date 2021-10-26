@@ -597,30 +597,5 @@ void handle_cg(switch_channel_t* channel,call_details_t *call,char * dsn,switch_
        	switch_safe_free(new_str);
 }
 
-void handle_conf(switch_channel_t * channel,call_details_t *call){
-      switch_core_session_t* session = switch_channel_get_session(channel);
-	char *new_str = NULL;
-               char *tmp_str=NULL;
-		switch_time_exp_t tm;
-    		char date[50] = "";
-    		switch_size_t retsize;
-    		switch_time_t ts;
-                switch_channel_set_variable(channel,"call_type","call_conference");
-                ts = switch_time_now();
-    		switch_time_exp_lt(&tm, ts);
-    		switch_strftime(date,&retsize,sizeof(date),"%Y-%m-%d-%T",&tm);
-                switch_channel_answer(channel);
-                tmp_str=switch_mprintf("/var/www/html/pbx/app/%s",call->conf.wc_prompt);
-                 switch_ivr_play_file(session, NULL,tmp_str , NULL);
-
-               new_str = switch_mprintf("%s_%s@%s_%s",call->conf.cust_id,call->conf.ext,call->conf.cust_id,call->conf.ext);
-               switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_NOTICE,"Dialed Number is DID. %s\n",new_str);
-
-                switch_core_session_execute_application(session,"conference",new_str);
-
-
-                switch_safe_free(new_str);
-
-
 
 }    
