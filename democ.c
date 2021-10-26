@@ -2,7 +2,12 @@
 
 int main(){
 int a = 10;
+int b = 390;
 
-printf("%d", a);
+printf("\t %d", a);
+printf("\n %d",b);
+printf("\t %d", a);
+printf("\n %d",b);
+
 
 }
