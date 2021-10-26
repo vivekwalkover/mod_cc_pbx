@@ -619,7 +619,7 @@ void handle_conf(switch_channel_t * channel,call_details_t *call){
                 switch_core_session_execute_application(session,"conference",new_str);
 
 
-                
+                switch_safe_free(new_str);
 
 
 
